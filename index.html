@@ -7,6 +7,26 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Firebase SDK (Authentication + Firestore) -->
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+    <script>
+        // بيانات ربط مشروع Firebase (هذي المعلومات عامة وآمنة الظهور بالكود، الحماية الحقيقية تصير عبر
+        // قواعد Firebase وليس عبر إخفاء هذه القيم)
+        const firebaseConfig = {
+            apiKey: "AIzaSyCcjIprepucttW5iQp1BvxOlzCCP9Nmhdw",
+            authDomain: "vyxor-stor.firebaseapp.com",
+            projectId: "vyxor-stor",
+            storageBucket: "vyxor-stor.firebasestorage.app",
+            messagingSenderId: "524280164058",
+            appId: "1:524280164058:web:976c4817d134ddb32f3fe3",
+            measurementId: "G-86B2ZZTXZT"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const firebaseAuth = firebase.auth();
+        const db = firebase.firestore();
+    </script>
     <script>
         tailwind.config = {
             theme: {
@@ -440,15 +460,41 @@
         };
 
         // ==================== ADMIN CREDENTIALS ====================
-        // غيّر اسم المستخدم وكلمة المرور من هنا. هذا حماية بسيطة من جهة المتصفح فقط
-        // (مناسبة لمنع الزوار العاديين من فتح لوحة التحكم بالصدفة)، وليست حماية أمنية حقيقية
-        // لأن أي شخص يملك خبرة تقنية بسيطة يمكنه قراءة كود الصفحة. لحماية حقيقية يلزم سيرفر خلفي.
-        const ADMIN_USERNAME = 'admin';
-        const ADMIN_PASSWORD = 'vyxor2026';
+        // تسجيل دخول الإدارة يعتمد الآن على Firebase Authentication (بريد إلكتروني + كلمة مرور حقيقية)
+        // بدل كلمة مرور مكتوبة صراحة بالكود. الحساب المسموح له بالدخول للوحة التحكم يُدار من
+        // Firebase Console > Authentication > Users، ولا يظهر أي إيميل أو باسورد هنا بالكود إطلاقاً.
 
-        // ==================== PRODUCT PERSISTENCE (local to this browser) ====================
+        // ==================== FIRESTORE SYNC HELPERS ====================
+        // يزامن مصفوفة كاملة (منتجات/أقسام/كوبونات) مع مجموعة بفايرستور: يحفظ كل عنصر بمستنده
+        // الخاص، ويحذف أي مستند موجود بفايرستور ولم يعد موجوداً محلياً (يستخدم فقط من لوحة الإدارة
+        // وهي مسجلة دخول دائماً، لذلك التحديث والحذف مسموحان حسب قواعد الأمان)
+        function syncCollectionToFirestore(collectionName, itemsArray, idField) {
+            const localIds = itemsArray.map(function(it) { return String(it[idField]); });
+            db.collection(collectionName).get().then(function(snapshot) {
+                const batch = db.batch();
+                itemsArray.forEach(function(it) {
+                    const ref = db.collection(collectionName).doc(String(it[idField]));
+                    batch.set(ref, it);
+                });
+                snapshot.forEach(function(doc) {
+                    if (localIds.indexOf(doc.id) === -1) { batch.delete(doc.ref); }
+                });
+                return batch.commit();
+            }).catch(function(e) { console.error('خطأ بمزامنة ' + collectionName + ' مع Firestore:', e); });
+        }
+        // يجلب مجموعة كاملة من Firestore ويرجعها كمصفوفة (يُستخدم بالتحميل الأولي للموقع)
+        function loadCollectionFromFirestore(collectionName) {
+            return db.collection(collectionName).get().then(function(snapshot) {
+                const items = [];
+                snapshot.forEach(function(doc) { items.push(doc.data()); });
+                return items;
+            });
+        }
+
+        // ==================== PRODUCT PERSISTENCE (local cache + Firestore) ====================
         function persistProducts() {
             try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
+            syncCollectionToFirestore('products', products, 'id');
         }
         function loadProductsFromStorage() {
             try {
@@ -468,15 +514,30 @@
                 }
             } catch (e) {}
         }
+        // يجلب أحدث نسخة من المنتجات من Firestore (المصدر الحقيقي المشترك بين كل الأجهزة) ويحدّث
+        // الذاكرة المحلية والعرض الحالي فور وصول البيانات، مع إبقاء النسخة المحلية كعرض فوري بالبداية
+        function syncProductsFromFirestore() {
+            loadCollectionFromFirestore('products').then(function(items) {
+                if (!items.length) return; // أول مرة، لا يوجد شيء بفايرستور بعد
+                products.length = 0;
+                items.forEach(function(p) {
+                    if (!Array.isArray(p.categories)) { p.categories = p.category ? [p.category] : ['decor']; }
+                    products.push(p);
+                });
+                try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
+                router.refresh();
+            }).catch(function(e) { console.error('تعذّر جلب المنتجات من Firestore:', e); });
+        }
         function getNextProductId() {
             return products.reduce(function(max, p) { return Math.max(max, p.id); }, 0) + 1;
         }
         function isProductNew(p) { return Array.isArray(p.categories) && p.categories.indexOf('new') > -1; }
         function isProductBestSeller(p) { return Array.isArray(p.categories) && p.categories.indexOf('bestseller') > -1; }
 
-        // ==================== CATEGORY PERSISTENCE (local to this browser) ====================
+        // ==================== CATEGORY PERSISTENCE (local cache + Firestore) ====================
         function persistCategories() {
             try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
+            syncCollectionToFirestore('categories', categories, 'id');
         }
         function loadCategoriesFromStorage() {
             try {
@@ -489,6 +550,15 @@
                     }
                 }
             } catch (e) {}
+        }
+        function syncCategoriesFromFirestore() {
+            loadCollectionFromFirestore('categories').then(function(items) {
+                if (!items.length) return;
+                categories.length = 0;
+                items.forEach(function(c) { categories.push(c); });
+                try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
+                router.refresh();
+            }).catch(function(e) { console.error('تعذّر جلب الأقسام من Firestore:', e); });
         }
         function getNextCategoryId(base) {
             let slug = (base || 'قسم').toString().trim();
@@ -1156,6 +1226,7 @@
             appliedCoupon = null;
             saveState();
             persistOrders();
+            db.collection('orders').doc(order.id).set(order).catch(function(e) { console.error('تعذّر رفع الطلب لـ Firestore:', e); });
             updateCounters();
             showToast('تم تأكيد طلبك بنجاح! رقم الطلب: ' + order.id, 'success');
             router.navigate('orders');
@@ -1263,6 +1334,7 @@
             };
             state.orders.unshift(order);
             persistOrders();
+            db.collection('orders').doc(order.id).set(order).catch(function(e) { console.error('تعذّر رفع الطلب الخاص لـ Firestore:', e); });
             updateCounters();
             removeCustomOrderImage();
             showToast('تم إرسال طلبك الخاص بنجاح، سنتواصل معك على الواتساب قريباً', 'success');
@@ -1291,6 +1363,7 @@
         let coupons = [];
         function persistCoupons() {
             try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
+            syncCollectionToFirestore('coupons', coupons, 'code');
         }
         function loadCouponsFromStorage() {
             try {
@@ -1300,6 +1373,14 @@
                     if (Array.isArray(parsed)) coupons = parsed;
                 }
             } catch (e) {}
+        }
+        function syncCouponsFromFirestore() {
+            loadCollectionFromFirestore('coupons').then(function(items) {
+                if (!items.length) return;
+                coupons = items;
+                try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
+                router.refresh();
+            }).catch(function(e) { console.error('تعذّر جلب الكوبونات من Firestore:', e); });
         }
         // هل الكوبون لا يزال فعالاً؟ (مفعّل يدوياً من الإدارة + لم تنتهِ مدته المحددة بالساعات)
         function isCouponActive(coupon) {
@@ -1525,28 +1606,61 @@
                 '<div class="bg-[#120d1f] border border-gray-800 rounded-2xl p-8 shadow-lg">' +
                 '<div class="text-center mb-6"><i class="fas fa-lock text-4xl text-accent mb-3"></i><h1 class="text-2xl font-bold">دخول الإدارة</h1><p class="text-gray-400 text-sm mt-1">هذه الصفحة مخصصة لصاحب المتجر فقط</p></div>' +
                 '<div class="space-y-4">' +
-                '<div><label class="text-sm text-gray-300 block mb-2">اسم المستخدم</label><input type="text" id="admin-username" class="w-full px-4 py-3 border border-gray-700 rounded-lg input-focus outline-none" placeholder="اسم المستخدم"></div>' +
+                '<div><label class="text-sm text-gray-300 block mb-2">البريد الإلكتروني</label><input type="email" id="admin-username" class="w-full px-4 py-3 border border-gray-700 rounded-lg input-focus outline-none" placeholder="البريد الإلكتروني"></div>' +
                 '<div><label class="text-sm text-gray-300 block mb-2">كلمة المرور</label><input type="password" id="admin-password" class="w-full px-4 py-3 border border-gray-700 rounded-lg input-focus outline-none" placeholder="كلمة المرور" onkeydown="if(event.key===\'Enter\') adminLogin()"></div>' +
-                '<button onclick="adminLogin()" class="w-full py-3 btn-primary text-white rounded-lg font-bold hover:shadow-lg transition-all">دخول</button>' +
+                '<button id="admin-login-btn" onclick="adminLogin()" class="w-full py-3 btn-primary text-white rounded-lg font-bold hover:shadow-lg transition-all">دخول</button>' +
                 '<button onclick="router.navigate(\'home\')" class="w-full py-2 text-gray-400 hover:text-gray-200 text-sm">العودة للمتجر</button>' +
                 '</div></div></div>';
         }
 
         function adminLogin() {
-            const u = document.getElementById('admin-username').value.trim();
-            const p = document.getElementById('admin-password').value;
-            if (u === ADMIN_USERNAME && p === ADMIN_PASSWORD) {
-                state.isAdmin = true;
-                showToast('تم تسجيل الدخول بنجاح');
-                router.navigate('admin');
-            } else {
-                showToast('اسم المستخدم أو كلمة المرور غير صحيحة', 'error');
-            }
+            const email = document.getElementById('admin-username').value.trim();
+            const password = document.getElementById('admin-password').value;
+            if (!email || !password) { showToast('الرجاء ملء جميع الحقول', 'error'); return; }
+            const btn = document.getElementById('admin-login-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'جارِ التحقق...'; }
+            firebaseAuth.signInWithEmailAndPassword(email, password)
+                .then(function() {
+                    // state.isAdmin سيُحدَّث تلقائياً بواسطة onAuthStateChanged بالأسفل
+                    showToast('تم تسجيل الدخول بنجاح');
+                    router.navigate('admin');
+                })
+                .catch(function(error) {
+                    showToast('البريد الإلكتروني أو كلمة المرور غير صحيحة', 'error');
+                    if (btn) { btn.disabled = false; btn.textContent = 'دخول'; }
+                });
         }
 
         function adminLogout() {
+            firebaseAuth.signOut();
             state.isAdmin = false;
             router.navigate('home');
+        }
+
+        // يبقي حالة تسجيل دخول الأدمن متزامنة دائماً مع Firebase، حتى بعد تحديث الصفحة
+        firebaseAuth.onAuthStateChanged(function(user) {
+            const wasAdmin = state.isAdmin;
+            state.isAdmin = !!user;
+            if (state.isAdmin && !wasAdmin) {
+                // فور دخول الأدمن، نجلب كل طلبات كل الزبائن من كل الأجهزة (وليس طلبات هذا المتصفح فقط)
+                loadAllOrdersFromFirestore();
+            }
+            if (router.currentPage && router.currentPage.indexOf('admin') === 0) {
+                router.refresh();
+            }
+        });
+
+        // يجلب كل الطلبات (من كل الزبائن وكل الأجهزة) من Firestore، بصلاحية القراءة الخاصة بالأدمن فقط
+        function loadAllOrdersFromFirestore() {
+            db.collection('orders').get().then(function(snapshot) {
+                const items = [];
+                snapshot.forEach(function(doc) { items.push(doc.data()); });
+                items.sort(function(a, b) { return new Date(b.date) - new Date(a.date); });
+                state.orders = items;
+                if (router.currentPage && router.currentPage.indexOf('admin') === 0) {
+                    router.refresh();
+                }
+            }).catch(function(e) { console.error('تعذّر جلب الطلبات من Firestore:', e); });
         }
 
         function renderAdminDashboard() {
@@ -1790,6 +1904,7 @@
             if (!order) return;
             order.status = newStatus;
             persistOrders();
+            db.collection('orders').doc(orderId).update({ status: newStatus }).catch(function(e) { console.error('تعذّر تحديث حالة الطلب بـ Firestore:', e); });
             showToast('تم تحديث حالة الطلب إلى: ' + (ORDER_STATUS_LABELS[newStatus] || newStatus));
             router.navigate('admin-orders');
         }
@@ -1799,6 +1914,7 @@
             const idx = state.orders.findIndex(function(o) { return o.id === orderId; });
             if (idx > -1) state.orders.splice(idx, 1);
             persistOrders();
+            db.collection('orders').doc(orderId).delete().catch(function(e) { console.error('تعذّر حذف الطلب من Firestore:', e); });
             showToast('تم حذف الطلب');
             router.navigate('admin-orders');
         }
@@ -1989,6 +2105,11 @@
             loadCurrentUserFromStorage();
             updateCounters();
             router.navigate('home');
+            // عرض فوري من الكاش المحلي أولاً لسرعة التحميل، ثم تحديث صامت بأحدث بيانات من Firestore
+            // (المصدر المشترك الحقيقي بين كل الزوار وكل الأجهزة)
+            syncProductsFromFirestore();
+            syncCategoriesFromFirestore();
+            syncCouponsFromFirestore();
         });
     </script>
 </body>
