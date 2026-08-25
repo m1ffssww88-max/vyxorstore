@@ -510,13 +510,21 @@
         // ==================== PRODUCT PERSISTENCE (local cache + Firestore) ====================
         // عَلَم يُفعَّل فور أي إضافة/تعديل محلي على المنتجات، لمنع مزامنة القراءة الأولية من Firestore
         // (التي تنطلق بالخلفية عند فتح الصفحة) من الكتابة فوق تعديل قام به الأدمن قبل أن تكتمل تلك القراءة
-        let productsDirty = false;
+        // العلم نفسه ينحفظ بـ localStorage (مو بالذاكرة بس) عشان يصمد لو المستخدم سوى رفريش
+        // قبل ما توصل عملية الحفظ/الحذف فعلياً لسيرفر Firestore — إذا ضاع العلم بالرفريش
+        // بينما الكتابة السحابية لسا معلّقة أو انقطعت، الاستماع اللحظي (onSnapshot) بيرجع
+        // البيانات القديمة من السحابة ويمحي التعديل المحلي (وهذا سبب رجوع المنتجات المحذوفة)
+        let productsDirty = (localStorage.getItem('vyxor_products_dirty') === '1');
+        function setProductsDirty(val) {
+            productsDirty = val;
+            try { localStorage.setItem('vyxor_products_dirty', val ? '1' : '0'); } catch (e) {}
+        }
         function persistProducts() {
-            productsDirty = true;
+            setProductsDirty(true);
             try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
             syncCollectionToFirestore('products', products, 'id', function(success) {
                 // إذا نجحت الكتابة بالسحابة، نلغي العلم لنسمح بعدها لتحديثات الأجهزة الثانية بالوصول لهذا الجهاز
-                if (success) productsDirty = false;
+                if (success) setProductsDirty(false);
             });
         }
         function loadProductsFromStorage() {
@@ -561,12 +569,16 @@
         function isProductBestSeller(p) { return Array.isArray(p.categories) && p.categories.indexOf('bestseller') > -1; }
 
         // ==================== CATEGORY PERSISTENCE (local cache + Firestore) ====================
-        let categoriesDirty = false;
+        let categoriesDirty = (localStorage.getItem('vyxor_categories_dirty') === '1');
+        function setCategoriesDirty(val) {
+            categoriesDirty = val;
+            try { localStorage.setItem('vyxor_categories_dirty', val ? '1' : '0'); } catch (e) {}
+        }
         function persistCategories() {
-            categoriesDirty = true;
+            setCategoriesDirty(true);
             try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
             syncCollectionToFirestore('categories', categories, 'id', function(success) {
-                if (success) categoriesDirty = false;
+                if (success) setCategoriesDirty(false);
             });
         }
         function loadCategoriesFromStorage() {
@@ -1403,12 +1415,16 @@
         // ==================== COUPONS (كوبونات الخصم) ====================
         // كل كوبون: { code, percent, durationHours, createdAt (ISO), active }
         let coupons = [];
-        let couponsDirty = false;
+        let couponsDirty = (localStorage.getItem('vyxor_coupons_dirty') === '1');
+        function setCouponsDirty(val) {
+            couponsDirty = val;
+            try { localStorage.setItem('vyxor_coupons_dirty', val ? '1' : '0'); } catch (e) {}
+        }
         function persistCoupons() {
-            couponsDirty = true;
+            setCouponsDirty(true);
             try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
             syncCollectionToFirestore('coupons', coupons, 'code', function(success) {
-                if (success) couponsDirty = false;
+                if (success) setCouponsDirty(false);
             });
         }
         function loadCouponsFromStorage() {
@@ -2254,6 +2270,13 @@
             router.navigate('home');
             // عرض فوري من الكاش المحلي أولاً لسرعة التحميل، ثم تحديث صامت بأحدث بيانات من Firestore
             // (المصدر المشترك الحقيقي بين كل الزوار وكل الأجهزة)
+            // لو فيه تعديل محلي (إضافة/تعديل/حذف) ما تأكد وصوله للسحابة قبل آخر رفريش (مثلاً صار
+            // رفريش بنفس اللحظة اللي كانت فيها الكتابة السحابية لسا بالطريق)، نعيد إرساله الآن قبل
+            // ما نفتح الاستماع اللحظي؛ لو ما سوينا هذا، أول قراءة من Firestore بترجع البيانات القديمة
+            // وتمحي التعديل المحلي (وهذا كان سبب رجوع المنتجات المحذوفة بعد الرفريش)
+            if (productsDirty) { syncCollectionToFirestore('products', products, 'id', function(success) { if (success) setProductsDirty(false); }); }
+            if (categoriesDirty) { syncCollectionToFirestore('categories', categories, 'id', function(success) { if (success) setCategoriesDirty(false); }); }
+            if (couponsDirty) { syncCollectionToFirestore('coupons', coupons, 'code', function(success) { if (success) setCouponsDirty(false); }); }
             syncProductsFromFirestore();
             syncCategoriesFromFirestore();
             syncCouponsFromFirestore();
