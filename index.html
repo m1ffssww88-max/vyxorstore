@@ -491,7 +491,11 @@
         }
 
         // ==================== PRODUCT PERSISTENCE (local cache + Firestore) ====================
+        // عَلَم يُفعَّل فور أي إضافة/تعديل محلي على المنتجات، لمنع مزامنة القراءة الأولية من Firestore
+        // (التي تنطلق بالخلفية عند فتح الصفحة) من الكتابة فوق تعديل قام به الأدمن قبل أن تكتمل تلك القراءة
+        let productsDirty = false;
         function persistProducts() {
+            productsDirty = true;
             try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
             syncCollectionToFirestore('products', products, 'id');
         }
@@ -518,6 +522,7 @@
         function syncProductsFromFirestore() {
             loadCollectionFromFirestore('products').then(function(items) {
                 if (!items.length) return; // أول مرة، لا يوجد شيء بفايرستور بعد
+                if (productsDirty) return; // تم إضافة/تعديل منتج محلياً بالفترة نفسها؛ لا نكتب فوقه ببيانات قديمة
                 products.length = 0;
                 items.forEach(function(p) {
                     if (!Array.isArray(p.categories)) { p.categories = p.category ? [p.category] : ['decor']; }
@@ -534,7 +539,9 @@
         function isProductBestSeller(p) { return Array.isArray(p.categories) && p.categories.indexOf('bestseller') > -1; }
 
         // ==================== CATEGORY PERSISTENCE (local cache + Firestore) ====================
+        let categoriesDirty = false;
         function persistCategories() {
+            categoriesDirty = true;
             try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
             syncCollectionToFirestore('categories', categories, 'id');
         }
@@ -553,6 +560,7 @@
         function syncCategoriesFromFirestore() {
             loadCollectionFromFirestore('categories').then(function(items) {
                 if (!items.length) return;
+                if (categoriesDirty) return;
                 categories.length = 0;
                 items.forEach(function(c) { categories.push(c); });
                 try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
@@ -1360,7 +1368,9 @@
         // ==================== COUPONS (كوبونات الخصم) ====================
         // كل كوبون: { code, percent, durationHours, createdAt (ISO), active }
         let coupons = [];
+        let couponsDirty = false;
         function persistCoupons() {
+            couponsDirty = true;
             try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
             syncCollectionToFirestore('coupons', coupons, 'code');
         }
@@ -1376,6 +1386,7 @@
         function syncCouponsFromFirestore() {
             loadCollectionFromFirestore('coupons').then(function(items) {
                 if (!items.length) return;
+                if (couponsDirty) return;
                 coupons = items;
                 try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
                 router.refresh();
