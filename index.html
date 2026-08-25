@@ -1803,12 +1803,31 @@
             document.getElementById('cf-image-file').onchange = function(e) {
                 const file = e.target.files && e.target.files[0];
                 if (!file) return;
+                if (!file.type || file.type.indexOf('image/') !== 0) {
+                    showToast('الرجاء اختيار ملف صورة صالح', 'error');
+                    e.target.value = '';
+                    return;
+                }
                 const reader = new FileReader();
+                reader.onerror = function() {
+                    showToast('تعذّر قراءة الملف', 'error');
+                };
                 reader.onload = function(ev) {
-                    imageInput.value = ev.target.result;
-                    document.getElementById('cf-preview-img').src = ev.target.result;
+                    const img = new Image();
+                    img.onload = function() {
+                        // نضغط الصورة قبل تخزينها حتى لا تتجاوز الحد الأقصى لحجم الحقل بفايرستور (1 ميغابايت)
+                        const dataUrl = compressImageToLimit(img, 700 * 1024);
+                        imageInput.value = dataUrl;
+                        document.getElementById('cf-preview-img').src = dataUrl;
+                        showToast('تم تجهيز الصورة بنجاح');
+                    };
+                    img.onerror = function() {
+                        showToast('تعذّر معالجة هذه الصورة', 'error');
+                    };
+                    img.src = ev.target.result;
                 };
                 reader.readAsDataURL(file);
+                e.target.value = ''; // نفرغ الحقل حتى يشتغل onchange مرة ثانية لو اختار نفس الملف
             };
         }
 
