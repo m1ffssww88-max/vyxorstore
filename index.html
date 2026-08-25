@@ -467,7 +467,7 @@
         // يزامن مصفوفة كاملة (منتجات/أقسام/كوبونات) مع مجموعة بفايرستور: يحفظ كل عنصر بمستنده
         // الخاص، ويحذف أي مستند موجود بفايرستور ولم يعد موجوداً محلياً (يستخدم فقط من لوحة الإدارة
         // وهي مسجلة دخول دائماً، لذلك التحديث والحذف مسموحان حسب قواعد الأمان)
-        function syncCollectionToFirestore(collectionName, itemsArray, idField) {
+        function syncCollectionToFirestore(collectionName, itemsArray, idField, onDone) {
             const localIds = itemsArray.map(function(it) { return String(it[idField]); });
             db.collection(collectionName).get().then(function(snapshot) {
                 const batch = db.batch();
@@ -479,7 +479,15 @@
                     if (localIds.indexOf(doc.id) === -1) { batch.delete(doc.ref); }
                 });
                 return batch.commit();
-            }).catch(function(e) { console.error('خطأ بمزامنة ' + collectionName + ' مع Firestore:', e); });
+            }).then(function() {
+                if (onDone) onDone(true);
+            }).catch(function(e) {
+                console.error('خطأ بمزامنة ' + collectionName + ' مع Firestore:', e);
+                // نظهر تحذير واضح للأدمن لأن الحفظ المحلي (localStorage) ينجح دائماً حتى لو فشلت
+                // المزامنة السحابية، وبدون هذا التنبيه ما راح يعرف إن التغيير ما وصل للأجهزة الثانية
+                showToast('تنبيه: التعديل انحفظ بهذا الجهاز فقط، وفشلت مزامنته مع السحابة (' + (e && e.code ? e.code : 'خطأ اتصال') + ')', 'error');
+                if (onDone) onDone(false);
+            });
         }
         // يجلب مجموعة كاملة من Firestore ويرجعها كمصفوفة (يُستخدم بالتحميل الأولي للموقع)
         function loadCollectionFromFirestore(collectionName) {
@@ -497,7 +505,10 @@
         function persistProducts() {
             productsDirty = true;
             try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
-            syncCollectionToFirestore('products', products, 'id');
+            syncCollectionToFirestore('products', products, 'id', function(success) {
+                // إذا نجحت الكتابة بالسحابة، نلغي العلم لنسمح بعدها لتحديثات الأجهزة الثانية بالوصول لهذا الجهاز
+                if (success) productsDirty = false;
+            });
         }
         function loadProductsFromStorage() {
             try {
@@ -517,20 +528,22 @@
                 }
             } catch (e) {}
         }
-        // يجلب أحدث نسخة من المنتجات من Firestore (المصدر الحقيقي المشترك بين كل الأجهزة) ويحدّث
-        // الذاكرة المحلية والعرض الحالي فور وصول البيانات، مع إبقاء النسخة المحلية كعرض فوري بالبداية
+        // يفتح استماعاً مباشراً (real-time) على مجموعة المنتجات بفايرستور بدل قراءة لمرة واحدة، بحيث أي
+        // تعديل يسويه الأدمن من أي جهاز يوصل تلقائياً لكل الأجهزة المفتوحة على الموقع بدون الحاجة لتحديث الصفحة
         function syncProductsFromFirestore() {
-            loadCollectionFromFirestore('products').then(function(items) {
-                if (!items.length) return; // أول مرة، لا يوجد شيء بفايرستور بعد
-                if (productsDirty) return; // تم إضافة/تعديل منتج محلياً بالفترة نفسها؛ لا نكتب فوقه ببيانات قديمة
+            db.collection('products').onSnapshot(function(snapshot) {
+                if (snapshot.empty) return; // لا يوجد شيء بفايرستور بعد
+                if (snapshot.metadata.hasPendingWrites) return; // هذا التحديث ناتج عن كتابتنا المحلية نفسها، وليس من جهاز ثاني
+                if (productsDirty) return; // عندنا تعديل محلي لسا ما اتأكدت كتابته، لا نكتب فوقه
                 products.length = 0;
-                items.forEach(function(p) {
+                snapshot.forEach(function(doc) {
+                    const p = doc.data();
                     if (!Array.isArray(p.categories)) { p.categories = p.category ? [p.category] : ['decor']; }
                     products.push(p);
                 });
                 try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
                 router.refresh();
-            }).catch(function(e) { console.error('تعذّر جلب المنتجات من Firestore:', e); });
+            }, function(e) { console.error('تعذّر الاستماع لتحديثات المنتجات من Firestore:', e); });
         }
         function getNextProductId() {
             return products.reduce(function(max, p) { return Math.max(max, p.id); }, 0) + 1;
@@ -543,7 +556,9 @@
         function persistCategories() {
             categoriesDirty = true;
             try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
-            syncCollectionToFirestore('categories', categories, 'id');
+            syncCollectionToFirestore('categories', categories, 'id', function(success) {
+                if (success) categoriesDirty = false;
+            });
         }
         function loadCategoriesFromStorage() {
             try {
@@ -558,14 +573,15 @@
             } catch (e) {}
         }
         function syncCategoriesFromFirestore() {
-            loadCollectionFromFirestore('categories').then(function(items) {
-                if (!items.length) return;
+            db.collection('categories').onSnapshot(function(snapshot) {
+                if (snapshot.empty) return;
+                if (snapshot.metadata.hasPendingWrites) return;
                 if (categoriesDirty) return;
                 categories.length = 0;
-                items.forEach(function(c) { categories.push(c); });
+                snapshot.forEach(function(doc) { categories.push(doc.data()); });
                 try { localStorage.setItem('vyxor_categories', JSON.stringify(categories)); } catch (e) {}
                 router.refresh();
-            }).catch(function(e) { console.error('تعذّر جلب الأقسام من Firestore:', e); });
+            }, function(e) { console.error('تعذّر الاستماع لتحديثات الأقسام من Firestore:', e); });
         }
         function getNextCategoryId(base) {
             let slug = (base || 'قسم').toString().trim();
@@ -1372,7 +1388,9 @@
         function persistCoupons() {
             couponsDirty = true;
             try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
-            syncCollectionToFirestore('coupons', coupons, 'code');
+            syncCollectionToFirestore('coupons', coupons, 'code', function(success) {
+                if (success) couponsDirty = false;
+            });
         }
         function loadCouponsFromStorage() {
             try {
@@ -1384,13 +1402,15 @@
             } catch (e) {}
         }
         function syncCouponsFromFirestore() {
-            loadCollectionFromFirestore('coupons').then(function(items) {
-                if (!items.length) return;
+            db.collection('coupons').onSnapshot(function(snapshot) {
+                if (snapshot.empty) return;
+                if (snapshot.metadata.hasPendingWrites) return;
                 if (couponsDirty) return;
-                coupons = items;
+                coupons = [];
+                snapshot.forEach(function(doc) { coupons.push(doc.data()); });
                 try { localStorage.setItem('vyxor_coupons', JSON.stringify(coupons)); } catch (e) {}
                 router.refresh();
-            }).catch(function(e) { console.error('تعذّر جلب الكوبونات من Firestore:', e); });
+            }, function(e) { console.error('تعذّر الاستماع لتحديثات الكوبونات من Firestore:', e); });
         }
         // هل الكوبون لا يزال فعالاً؟ (مفعّل يدوياً من الإدارة + لم تنتهِ مدته المحددة بالساعات)
         function isCouponActive(coupon) {
