@@ -7,10 +7,11 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <!-- Firebase SDK (Authentication + Firestore) -->
+    <!-- Firebase SDK (Authentication + Firestore + Storage) -->
     <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-storage-compat.js"></script>
     <script>
         // بيانات ربط مشروع Firebase (هذي المعلومات عامة وآمنة الظهور بالكود، الحماية الحقيقية تصير عبر
         // قواعد Firebase وليس عبر إخفاء هذه القيم)
@@ -26,6 +27,7 @@
         firebase.initializeApp(firebaseConfig);
         const firebaseAuth = firebase.auth();
         const db = firebase.firestore();
+        const storage = firebase.storage();
     </script>
     <script>
         tailwind.config = {
@@ -1998,7 +2000,14 @@
                 '<div><label class="text-sm text-gray-300 block mb-1">السعر الحالي (د.ع)</label><input id="pf-price" type="number" value="' + (product ? product.price : '') + '" class="w-full px-3 py-2 border border-gray-700 rounded-lg input-focus outline-none"></div>' +
                 '<div><label class="text-sm text-gray-300 block mb-1">السعر قبل الخصم (اختياري)</label><input id="pf-oldprice" type="number" value="' + (product && product.oldPrice ? product.oldPrice : '') + '" class="w-full px-3 py-2 border border-gray-700 rounded-lg input-focus outline-none"></div>' +
                 '</div>' +
-                '<div><label class="text-sm text-gray-300 block mb-1">رابط صورة المنتج</label><input id="pf-image" type="text" value="' + (product ? product.images[0] : '') + '" placeholder="https://..." class="w-full px-3 py-2 border border-gray-700 rounded-lg input-focus outline-none"></div>' +
+                '<div><label class="text-sm text-gray-300 block mb-1">صورة المنتج</label>' +
+                '<div class="flex items-center gap-3 mb-2">' +
+                '<img id="pf-image-preview" src="' + (product ? product.images[0] : '') + '" class="w-16 h-16 rounded-lg object-cover bg-[#1a1025] border border-gray-700' + (product && product.images[0] ? '' : ' hidden') + '">' +
+                '<label class="flex-1 cursor-pointer px-3 py-2 border border-dashed border-gray-600 rounded-lg text-center text-sm text-gray-300 hover:border-accent">' +
+                '<i class="fas fa-upload ml-1"></i><span id="pf-image-status">رفع صورة من الجهاز</span>' +
+                '<input id="pf-image-file" type="file" accept="image/*" class="hidden" onchange="handleProductImageUpload(this)"></label>' +
+                '</div>' +
+                '<input id="pf-image" type="text" value="' + (product ? product.images[0] : '') + '" placeholder="أو ألصق رابط صورة مباشر https://..." class="w-full px-3 py-2 border border-gray-700 rounded-lg input-focus outline-none text-xs" oninput="const pv=document.getElementById(\'pf-image-preview\'); if(pv){ pv.src=this.value; pv.classList.toggle(\'hidden\', !this.value); }"></div>' +
                 '<div><label class="text-sm text-gray-300 block mb-2">الألوان المتوفرة (اختر لون أو أكثر)</label>' +
                 '<div id="pf-colors" class="grid grid-cols-4 sm:grid-cols-5 gap-2">' + COLOR_PALETTE.map(function(c) {
                     const isPicked = product ? product.colors.some(function(pc) { return pc.name === c.name; }) : false;
@@ -2018,9 +2027,48 @@
             document.getElementById('pf-price').value = product ? product.price : '';
             document.getElementById('pf-oldprice').value = (product && product.oldPrice) ? product.oldPrice : '';
             document.getElementById('pf-image').value = product ? product.images[0] : '';
+            const pfPreview = document.getElementById('pf-image-preview');
+            if (pfPreview) { pfPreview.src = product ? product.images[0] : ''; pfPreview.classList.toggle('hidden', !(product && product.images[0])); }
             document.getElementById('pf-stock').value = product ? product.stock : '10';
             document.getElementById('pf-desc').value = product ? product.description : '';
             document.getElementById('pf-fulldesc').value = product ? product.fullDescription : '';
+        }
+
+        // يرفع صورة المنتج المختارة من جهاز الأدمن (كاميرا/معرض) مباشرة إلى Firebase Storage، مهما كان
+        // حجمها أو أبعادها، ثم يضع رابط التحميل النهائي بخانة الرابط ليبقى يشتغل بنفس آلية الحفظ الحالية
+        function handleProductImageUpload(inputEl) {
+            const file = inputEl.files && inputEl.files[0];
+            if (!file) return;
+            if (!file.type || file.type.indexOf('image/') !== 0) {
+                showToast('الرجاء اختيار ملف صورة صالح', 'error');
+                inputEl.value = '';
+                return;
+            }
+            const statusEl = document.getElementById('pf-image-status');
+            const urlEl = document.getElementById('pf-image');
+            const previewEl = document.getElementById('pf-image-preview');
+            // نعرض معاينة فورية من الجهاز نفسه (قبل اكتمال الرفع) لأي حجم صورة
+            const localPreviewUrl = URL.createObjectURL(file);
+            if (previewEl) { previewEl.src = localPreviewUrl; previewEl.classList.remove('hidden'); }
+            if (statusEl) statusEl.textContent = 'جاري الرفع... 0%';
+            const safeName = Date.now() + '_' + file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+            const ref = storage.ref().child('products/' + safeName);
+            const task = ref.put(file);
+            task.on('state_changed', function(snapshot) {
+                const pct = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+                if (statusEl) statusEl.textContent = 'جاري الرفع... ' + pct + '%';
+            }, function(error) {
+                console.error('خطأ برفع صورة المنتج:', error);
+                showToast('فشل رفع الصورة (' + (error && error.code ? error.code : 'خطأ اتصال') + ')', 'error');
+                if (statusEl) statusEl.textContent = 'رفع صورة من الجهاز';
+            }, function() {
+                task.snapshot.ref.getDownloadURL().then(function(downloadUrl) {
+                    if (urlEl) urlEl.value = downloadUrl;
+                    if (previewEl) { previewEl.src = downloadUrl; previewEl.classList.remove('hidden'); }
+                    if (statusEl) statusEl.textContent = 'تم رفع الصورة ✅ (اضغط لتغييرها)';
+                    showToast('تم رفع الصورة بنجاح');
+                });
+            });
         }
 
         function saveProductForm(productId) {
@@ -2037,7 +2085,7 @@
             const fullDescription = document.getElementById('pf-fulldesc').value.trim();
 
             if (!name || !price) { showToast('الرجاء إدخال اسم المنتج والسعر', 'error'); return; }
-            if (selectedCategories.length === 0) { showToast('الرجاء اختيار قسم واحد على الأقل للمنتج', 'error'); return; }
+            // اختيار قسم صار اختيارياً: يمكن حفظ المنتج بدون أي قسم، ويظهر وقتها بقسم "الكل" فقط
 
             const discount = (oldPrice && oldPrice > price) ? Math.round(((oldPrice - price) / oldPrice) * 100) : 0;
             const saveAmount = (oldPrice && oldPrice > price) ? (oldPrice - price) : 0;
