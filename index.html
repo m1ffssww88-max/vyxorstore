@@ -506,6 +506,55 @@
                 return items;
             });
         }
+        // يحفظ (يضيف/يحدّث) كل المنتجات الموجودة حالياً بالقائمة المحلية، كل منتج بمستنده الخاص،
+        // بدون قراءة أو حذف أي مستند آخر بالمجموعة. هذا مقصود ومهم: القائمة المحلية بهذا الجهاز
+        // ممكن ما تكون شايفة منتجات أضافتها أجهزة ثانية بعد؛ لو حذفنا "الفرق" بين القائمتين
+        // (زي ما كانت تسوي syncCollectionToFirestore) بنمسح تلك المنتجات من السحابة بالغلط —
+        // وهذا بالضبط كان سبب اختفاء منتجات جديدة ورجوع منتجات كانت انحذفت من جهاز ثاني
+        function upsertAllProductsToFirestore(onDone) {
+            const batch = db.batch();
+            products.forEach(function(p) { batch.set(db.collection('products').doc(String(p.id)), p); });
+            batch.commit().then(function() {
+                if (onDone) onDone(true);
+            }).catch(function(e) {
+                console.error('خطأ بمزامنة المنتجات مع Firestore:', e);
+                showToast('تنبيه: التعديل انحفظ بهذا الجهاز فقط، وفشلت مزامنته مع السحابة (' + (e && e.code ? e.code : 'خطأ اتصال') + ')', 'error');
+                showSyncError('فشل حفظ منتج بمجموعة "products" على Firestore — الكود: ' + (e && e.code ? e.code : '؟') + ' — الرسالة: ' + (e && e.message ? e.message : String(e)));
+                if (onDone) onDone(false);
+            });
+        }
+        // يحذف منتج واحد محدد بمعرّفه مباشرة من فايرستور (حذف مستهدف بالاسم، وليس عبر مقارنة
+        // القائمة المحلية كاملة بالسحابة) — هذا آمن حتى لو القائمة المحلية بهذا الجهاز غير محدّثة
+        // بمنتجات أضافتها أجهزة ثانية، لأنه ما يمس أي مستند إلا المستند المطلوب حذفه فعلاً
+        function deleteProductFromFirestore(productId, onDone) {
+            db.collection('products').doc(String(productId)).delete().then(function() {
+                if (onDone) onDone(true);
+            }).catch(function(e) {
+                console.error('خطأ بحذف المنتج من فايرستور:', e);
+                showToast('تنبيه: الحذف انحفظ بهذا الجهاز فقط، وفشلت مزامنته مع السحابة (' + (e && e.code ? e.code : 'خطأ اتصال') + ')', 'error');
+                showSyncError('فشل حذف منتج من Firestore — الكود: ' + (e && e.code ? e.code : '؟') + ' — الرسالة: ' + (e && e.message ? e.message : String(e)));
+                if (onDone) onDone(false);
+            });
+        }
+        // قائمة بمعرّفات منتجات انحذفت محلياً ولسا الحذف ما تأكد وصوله لفايرستور (تصمد بـ
+        // localStorage عشان لو صار رفريش قبل ما يكتمل الحذف السحابي، نعيد المحاولة بأول تحميل)
+        let pendingProductDeleteIds = [];
+        try { pendingProductDeleteIds = JSON.parse(localStorage.getItem('vyxor_pending_product_deletes') || '[]'); } catch (e) { pendingProductDeleteIds = []; }
+        function savePendingProductDeleteIds() {
+            try { localStorage.setItem('vyxor_pending_product_deletes', JSON.stringify(pendingProductDeleteIds)); } catch (e) {}
+        }
+        function addPendingProductDelete(productId) {
+            if (pendingProductDeleteIds.indexOf(productId) === -1) { pendingProductDeleteIds.push(productId); savePendingProductDeleteIds(); }
+        }
+        function removePendingProductDelete(productId) {
+            const i = pendingProductDeleteIds.indexOf(productId);
+            if (i > -1) { pendingProductDeleteIds.splice(i, 1); savePendingProductDeleteIds(); }
+        }
+        function retryPendingProductDeletes() {
+            pendingProductDeleteIds.slice().forEach(function(id) {
+                deleteProductFromFirestore(id, function(success) { if (success) removePendingProductDelete(id); });
+            });
+        }
 
         // ==================== PRODUCT PERSISTENCE (local cache + Firestore) ====================
         // عَلَم يُفعَّل فور أي إضافة/تعديل محلي على المنتجات، لمنع مزامنة القراءة الأولية من Firestore
@@ -522,7 +571,7 @@
         function persistProducts() {
             setProductsDirty(true);
             try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
-            syncCollectionToFirestore('products', products, 'id', function(success) {
+            upsertAllProductsToFirestore(function(success) {
                 // إذا نجحت الكتابة بالسحابة، نلغي العلم لنسمح بعدها لتحديثات الأجهزة الثانية بالوصول لهذا الجهاز
                 if (success) setProductsDirty(false);
             });
@@ -2025,7 +2074,9 @@
             if (!confirm('هل أنت متأكد من حذف "' + product.name + '" نهائياً من المتجر؟')) return;
             const idx = products.findIndex(function(p) { return p.id === productId; });
             if (idx > -1) products.splice(idx, 1);
-            persistProducts();
+            try { localStorage.setItem('vyxor_products', JSON.stringify(products)); } catch (e) {}
+            addPendingProductDelete(productId);
+            deleteProductFromFirestore(productId, function(success) { if (success) removePendingProductDelete(productId); });
             showToast('تم حذف المنتج');
             router.navigate('admin');
         }
@@ -2274,7 +2325,8 @@
             // رفريش بنفس اللحظة اللي كانت فيها الكتابة السحابية لسا بالطريق)، نعيد إرساله الآن قبل
             // ما نفتح الاستماع اللحظي؛ لو ما سوينا هذا، أول قراءة من Firestore بترجع البيانات القديمة
             // وتمحي التعديل المحلي (وهذا كان سبب رجوع المنتجات المحذوفة بعد الرفريش)
-            if (productsDirty) { syncCollectionToFirestore('products', products, 'id', function(success) { if (success) setProductsDirty(false); }); }
+            if (productsDirty) { upsertAllProductsToFirestore(function(success) { if (success) setProductsDirty(false); }); }
+            retryPendingProductDeletes();
             if (categoriesDirty) { syncCollectionToFirestore('categories', categories, 'id', function(success) { if (success) setCategoriesDirty(false); }); }
             if (couponsDirty) { syncCollectionToFirestore('coupons', coupons, 'code', function(success) { if (success) setCouponsDirty(false); }); }
             syncProductsFromFirestore();
